@@ -26,6 +26,9 @@
 #include <deal.II/base/function.h> //
 #include <deal.II/base/timer.h> //
 
+
+
+
 // Support parallelization with petsc + p4est
 #include <deal.II/lac/generic_linear_algebra.h>
 #define USE_PETSC_LA
@@ -209,8 +212,9 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
     //Y_Iso_Ta2O5 = Ta2O5 isotropic coating material
     //Young tensors Yijkl
     Tensor<4,dim>        Y_Iso_FusedSilica, Y_AlGaAs, 
-      Y_Iso_Ta2O5, Y_Iso_AlGaAs;
-
+      Y_Iso_Ta2O5, Y_Iso_AlGaAs, Y_Iso_Ta2O5_Phi, Y_Iso_FusedSilica_Phi, Y_AlGaAs_Phi, Y_Iso_AlGaAs_Phi;
+      
+      
     //The built-in Young's tensors have lame_mu and lame_lambda defined
     //These are the Lame parameters used to construct Y
     double               lame_mu_FusedSilica, lame_lambda_FusedSilica, 
@@ -219,6 +223,10 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
 
     //Mirror dimensions
     double r0, F0, d;
+    
+    // Loss Angles for Young's tensors that can vary
+    double phi11, phi12, phi44, lossPhi_Ta2O5_bulk, lossPhi_Ta2O5_shear, lossPhi_Iso_FusedSilica_bulk , lossPhi_Iso_FusedSilica_shear, lossPhi_Iso_AlGaAs_bulk, lossPhi_Iso_AlGaAs_shear;
+    double myeq, mywq;
 
     //Loss angles for each built-in material
     // lossPhi_Iso_FusedSilica = fused silica
@@ -241,6 +249,9 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
 
     double getYijkl(int whichYijkl, unsigned int i, 
 		    unsigned int j, unsigned int k, unsigned int l);
+    double getMultLossAngleYijkl(int whichYijkl, unsigned int i,
+            unsigned int j, unsigned int k, unsigned int l);
+      
   };
 
   //****************************************************************//
@@ -461,6 +472,28 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
     return 0.0;
   }
 
+    // Switch case to find Yijkl using more than one loss angle for the coating.
+    template <int dim> double
+    ElasticProblem<dim>::getMultLossAngleYijkl(int whichYijkl, unsigned int i,
+                                               unsigned int j, unsigned int k,
+                                               unsigned int l) {
+    switch(whichYijkl) {
+        case(kAlGaAs):
+            return Y_AlGaAs_Phi[i][j][k][l];
+        case(kIso_AlGaAs):
+            return Y_Iso_AlGaAs_Phi[i][j][k][l];
+        case(kIso_Ta2O5):
+            return Y_Iso_Ta2O5_Phi[i][j][k][l];
+        case(kIso_FusedSilica):
+            return Y_Iso_FusedSilica_Phi[i][j][k][l];
+        default:
+            std::cout << "WARNING! Invalid Yijkl string. Do not trust results!\n";
+            break;
+    }
+    return 0.0;
+  }
+    
+
   template <int dim>
   ElasticProblem<dim>::ElasticProblem ()
     :
@@ -484,13 +517,20 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
     Y_AlGaAs(),
     Y_Iso_Ta2O5(),
     Y_Iso_AlGaAs(),
+    
+    
+    Y_Iso_Ta2O5_Phi(),
+    Y_Iso_FusedSilica_Phi(),
+    Y_AlGaAs_Phi(),
+    Y_Iso_AlGaAs_Phi(),
+    
     //Initialize a timer
     computing_timer (mpi_communicator,
                      pcout,
                      TimerOutput::summary,
                      TimerOutput::wall_times),
     mVTKOutput(false),
-    mNumberOfCycles(3) // resolutions to do: 0,1,...mNumberOfCycles - 1
+    mNumberOfCycles(10) // resolutions to do: 0,1,...mNumberOfCycles - 1
 
   {
 
@@ -500,8 +540,31 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
     //kIso_AlGaAs #effective isotropic approx to x=0.92 AlGaAs
     //kIso_Ta2O5 #tantalum
     //kIso_FusedSilica #fused silica
-    mWhichCoatingYijkl = kAlGaAs;
+    mWhichCoatingYijkl =   kIso_Ta2O5;
     mWhichSubstrateYijkl = kIso_FusedSilica;
+      
+      
+    lossPhi_Iso_FusedSilica = 1.e-6; //Cole+ (2013)
+    //    lossPhi_Iso_Ta2O5 = 4.e-4; //Yamamoto+ (2006), PRD 74, 022002
+    // (good value??)
+    lossPhi_Iso_Ta2O5 = 2.3e-4; // Value from Hong + et. al.
+
+    lossPhi_Iso_AlGaAs = 2.5e-5; //Cole+ (2013)
+    lossPhi_AlGaAs = lossPhi_Iso_AlGaAs; //use same loss angle from Cole+(2013)
+      
+    phi11 = 2.5e-5;
+    phi12 = 2.5e-5;
+    phi44 = 2.5e-5;
+    
+      
+    lossPhi_Iso_FusedSilica_bulk  = lossPhi_Iso_FusedSilica;
+    lossPhi_Iso_FusedSilica_shear = lossPhi_Iso_FusedSilica;
+    
+    lossPhi_Ta2O5_bulk  = 0.00115;
+    lossPhi_Ta2O5_shear = 2.3e-4;
+      
+    lossPhi_Iso_AlGaAs_bulk  = lossPhi_Iso_AlGaAs;
+    lossPhi_Iso_AlGaAs_shear = lossPhi_Iso_AlGaAs;
 
     // I hereby declare code units so that 1 = 1 TPa for stress tensor
     //                                     1 = beam size for length
@@ -558,8 +621,8 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
     //Set Y_Iso_FusedSilica   
     for(int i=0;i<dim;++i) {
       for(int j=0;j<dim;++j) {
-	for(int k=0;k<dim;++k) {
-	  for(int l=0;l<dim;++l) {
+          for(int k=0;k<dim;++k) {
+              for(int l=0;l<dim;++l) {
 	    
 	    //Y_{ijkl} = lambda dij dkl + mu dik djl + mu dil djk
 	    if(i==j && k==l) {
@@ -572,12 +635,37 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
 	    
 	    if(i==l && j==k) {
 	      Y_Iso_FusedSilica[i][j][k][l] += lame_mu_FusedSilica;
-	    }
+        }
 	    
-	  }
-	}
-      }
-    }  
+              }
+          }
+        }
+    }
+      
+      
+    //Set Y_Iso_FusedSilica in terms of the bulk and shear moduli
+    for(int i=0;i<dim;++i) {
+        for(int j=0;j<dim;++j) {
+            for(int k=0;k<dim;++k) {
+                for(int l=0;l<dim;++l) {
+                      
+        //Y_{ijkl} = lambda dij dkl + mu dik djl + mu dil djk
+        if(i==j && k==l) {
+        Y_Iso_FusedSilica_Phi[i][j][k][l] += (((lame_lambda_FusedSilica + (lame_mu_FusedSilica * (2.0/3.0)))  * lossPhi_Iso_FusedSilica_bulk) - ((2.0/3.0) * lame_mu_FusedSilica * lossPhi_Iso_FusedSilica_shear));
+        }
+                      
+        if(i==k && j==l) {
+        Y_Iso_FusedSilica_Phi[i][j][k][l] += (lame_mu_FusedSilica * lossPhi_Iso_FusedSilica_shear);
+        }
+                      
+        if(i==l && j==k) {
+        Y_Iso_FusedSilica_Phi[i][j][k][l] += (lame_mu_FusedSilica * lossPhi_Iso_FusedSilica_shear);
+                      }
+                      
+                  }
+              }
+          }
+      }  
 
     // For isotropic materials, choose the Lame parameters.
     // Here: Ta2O5
@@ -592,8 +680,8 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
     //Set Y_Ta2O5   
     for(int i=0;i<dim;++i) {
       for(int j=0;j<dim;++j) {
-	for(int k=0;k<dim;++k) {
-	  for(int l=0;l<dim;++l) {
+          for(int k=0;k<dim;++k) {
+              for(int l=0;l<dim;++l) {
 	    
 	    //Y_{ijkl} = lambda dij dkl + mu dik djl + mu dil djk
 	    if(i==j && k==l) {
@@ -608,10 +696,36 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
 	      Y_Iso_Ta2O5[i][j][k][l] += lame_mu_Ta2O5;
 	    }
 	    
-	  }
-	}
+              }
+          }
       }
-    }  
+    }
+    
+    //Set Y_Ta2O5 in terms of the bulk and shear moduli
+    for(int i=0;i<dim;++i) {
+        for(int j=0;j<dim;++j) {
+            for(int k=0;k<dim;++k) {
+                for(int l=0;l<dim;++l) {
+                    
+            //Y_{ijkl} = lambda dij dkl + mu dik djl + mu dil djk
+            if(i==j && k==l) {
+	      Y_Iso_Ta2O5_Phi[i][j][k][l] += (((lame_lambda_Ta2O5 + (lame_mu_Ta2O5 * (2.0/3.0)))  * lossPhi_Ta2O5_bulk) - (((2.0/3.0) * lame_mu_Ta2O5) * lossPhi_Ta2O5_shear) );
+                }
+            
+            if(i==k && j==l) {
+	      Y_Iso_Ta2O5_Phi[i][j][k][l] += (lame_mu_Ta2O5 * lossPhi_Ta2O5_shear);
+                }
+                      
+            if(i==l && j==k) {
+	      Y_Iso_Ta2O5_Phi[i][j][k][l] += (lame_mu_Ta2O5 * lossPhi_Ta2O5_shear);
+                }
+                      
+                  }
+              }
+          }
+      }
+      
+      
 
     // For isotropic materials, choose the Lame parameters.
     // Here: AlGaAs effective isotropic
@@ -626,8 +740,8 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
     //Set Y_Iso_AlGaAs   
     for(int i=0;i<dim;++i) {
       for(int j=0;j<dim;++j) {
-	for(int k=0;k<dim;++k) {
-	  for(int l=0;l<dim;++l) {
+          for(int k=0;k<dim;++k) {
+              for(int l=0;l<dim;++l) {
 	    
 	    //Y_{ijkl} = lambda dij dkl + mu dik djl + mu dil djk
 	    if(i==j && k==l) {
@@ -642,11 +756,41 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
 	      Y_Iso_AlGaAs[i][j][k][l] += lame_mu_AlGaAs;
 	    }
 	    
-	  }
-	}
+              }
+          }
       }
     }  
 
+      // Here we use mu = lambda_mu_AlGaAs. To solve for the bulk modulus, we use
+      // K = lambda + 2/3 mu
+      // where K is the bulk modulus, lambda is the first lame coefficient, and mu is the shear modulus/ second lame coeffiecient.
+      
+      // Y[i][j][k][l]
+      
+      for(int i=0;i<dim;++i) {
+          for(int j=0;j<dim;++j) {
+              for(int k=0;k<dim;++k) {
+                  for(int l=0;l<dim;++l) {
+                      
+                      //Y_{ijkl} = lambda dij dkl + mu dik djl + mu dil djk
+                      if(i==j && k==l)
+                      {
+                          Y_Iso_AlGaAs_Phi[i][j][k][l] += (((lame_lambda_AlGaAs + (lame_mu_AlGaAs * (2.0/3.0)))  * lossPhi_Iso_AlGaAs_bulk) - ((2.0/3.0) * lame_mu_AlGaAs * lossPhi_Iso_AlGaAs_shear));
+                      }
+                      
+                      if(i==k && j==l) {
+                          Y_Iso_AlGaAs_Phi[i][j][k][l] += (lame_mu_AlGaAs * lossPhi_Iso_AlGaAs_shear);
+                      }
+                      
+                      if(i==l && j==k) {
+                          Y_Iso_AlGaAs_Phi[i][j][k][l] += (lame_mu_AlGaAs  * lossPhi_Iso_AlGaAs_shear);
+                      }
+                      
+                  }
+              }
+          }
+      }
+      
 
     //Set Y to a cubic crystal Yijkl
     //Specifically, use Al_{x}Ga_{1-x}As
@@ -695,17 +839,39 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
     Y_AlGaAs[1][2][2][1] =c44;
     Y_AlGaAs[2][1][1][2] =c44;
     Y_AlGaAs[2][1][2][1] =c44;
+      
+      
+    Y_AlGaAs_Phi[0][0][0][0] =c11*phi11;
+    Y_AlGaAs_Phi[1][1][1][1] =c11*phi11;
+    Y_AlGaAs_Phi[2][2][2][2] =c11*phi11;
+      
+    Y_AlGaAs_Phi[0][0][1][1] =c12*phi12;
+    Y_AlGaAs_Phi[0][0][2][2] =c12*phi12;
+    Y_AlGaAs_Phi[1][1][0][0] =c12*phi12;
+    Y_AlGaAs_Phi[1][1][2][2] =c12*phi12;
+    Y_AlGaAs_Phi[2][2][0][0] =c12*phi12;
+    Y_AlGaAs_Phi[2][2][1][1] =c12*phi12;
+      
+    Y_AlGaAs_Phi[0][1][0][1] =c44*phi44;
+    Y_AlGaAs_Phi[0][1][1][0] =c44*phi44;
+    Y_AlGaAs_Phi[1][0][0][1] =c44*phi44;
+    Y_AlGaAs_Phi[1][0][1][0] =c44*phi44;
+      
+    Y_AlGaAs_Phi[0][2][0][2] =c44*phi44;
+    Y_AlGaAs_Phi[0][2][2][0] =c44*phi44;
+    Y_AlGaAs_Phi[2][0][0][2] =c44*phi44;
+    Y_AlGaAs_Phi[2][0][2][0] =c44*phi44;
+    
+    Y_AlGaAs_Phi[1][2][1][2] =c44*phi44;
+    Y_AlGaAs_Phi[1][2][2][1] =c44*phi44;
+    Y_AlGaAs_Phi[2][1][1][2] =c44*phi44;
+    Y_AlGaAs_Phi[2][1][2][1] =c44*phi44;
 
     // Define some dimensionless loss angles.
     // lossPhi_Iso_FusedSilica = fused silica
     // lossPhi_Iso_Ta2O5 = Tantalum oxide
     // lossAlGaAsx92 = x=0.92 AlGaAs
     //lossPhi = 1.e-7; //Chalermsongsak+ (2015) Table I
-    lossPhi_Iso_FusedSilica = 1.e-6; //Cole+ (2013)
-    lossPhi_Iso_Ta2O5 = 4.e-4; //Yamamoto+ (2006), PRD 74, 022002 
-                               // (good value??)
-    lossPhi_Iso_AlGaAs = 2.5e-5; //Cole+ (2013)
-    lossPhi_AlGaAs = lossPhi_Iso_AlGaAs; //use same loss angle from Cole+(2013)
 
 
 
@@ -1202,6 +1368,10 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
     double local_coatingEnergy = 0.;
     double local_substrateEnergy = 0.;
     double local_thisEnergy = 0.;
+      
+    double local_U_coating_energy = 0;
+    double local_U_this_energy = 0.;
+      
     typename DoFHandler<dim>::active_cell_iterator 
       cell = dof_handler.begin_active(),
       endc = dof_handler.end();
@@ -1228,13 +1398,14 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
       
 	//store current quadrature point's Young's modulus
 	double theYijkl = 0.;
+    double sYijkl = 0;
 
 	//Do the vector component loops
 	for(unsigned int q_point=0; q_point < n_q_points; ++q_point) {
 	  for(int i=0;i<dim;++i) {
 	    for(int j=0;j<dim;++j) {
 	      for(int k=0;k<dim;++k) {
-		for(int l=0;l<dim;++l) {
+              for(int l=0;l<dim;++l) {
 
 		  local_thisEnergy =
 		    0.5 
@@ -1261,10 +1432,38 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
 	}
       }
 	
+          
+          for(unsigned int q_point=0; q_point < n_q_points; ++q_point) {
+              for(int i=0;i<dim;++i) {
+                  for(int j=0;j<dim;++j) {
+                      for(int k=0;k<dim;++k) {
+                          for(int l=0;l<dim;++l) {
+                              
+                              local_U_this_energy =
+                              0.5
+                              * fe_values.JxW(q_point)
+                              * solution_gradients[q_point][j][i]
+                              * solution_gradients[q_point][l][k];
+                              
+                              // only perform the energy calculation for points above 0
+                              // since we are only interested in the coating.
+                              
+                              if(fe_values.quadrature_point(q_point)(dim-1) > 0.)
+                              {
+                                  sYijkl = getMultLossAngleYijkl(mWhichCoatingYijkl,i,j,k,l);
+                                  local_U_this_energy *= sYijkl;
+                                  local_U_coating_energy += local_U_this_energy;
+                              }
+                              
+                          }
+                      }
+                  }
+              }
+          }
+          
       }
     }
-    
-
+      
 
     //create a vector to hold the energy values: 1 per process
 
@@ -1273,6 +1472,10 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
 						 mpi_communicator);
     double coatingEnergy =  Utilities::MPI::sum(local_coatingEnergy,
 						mpi_communicator);
+    double MultLossCoatingEnergy = Utilities::MPI::sum(local_U_coating_energy,
+                        mpi_communicator);
+
+      
     //Normalize energy: Fluctuation-dissipation theorem divides out F0^2
     //dependence. I just do this here.
     energy /= F0*F0;
@@ -1398,10 +1601,62 @@ CylTransFunc::CylTransFunc(double coatThick, double halfCylThick):
       //Use same loss angle for coating whether crystal or effective isotropic
       toSI * fourKbToverPi * coatingEnergy * coatLossAngle;
     const double totalNoiseTimesf = subNoiseTimesf + coatNoiseTimesf;
-
+      
     const double subAmpNoiseTimesSqrtf = sqrt(subNoiseTimesf);
     const double coatAmpNoiseTimesSqrtf = sqrt(coatNoiseTimesf);
     const double totalAmpNoiseTimesSqrtf = sqrt(totalNoiseTimesf);
+
+      
+   MultLossCoatingEnergy /= F0*F0;
+   
+   // MultLossCoatingEnergy is defined with the loss angles already.
+   const double MultLossCoatNoiseTimesf = toSI * fourKbToverPi * MultLossCoatingEnergy;
+   const double MultLossCoatNoiseTimesfSqrtf = sqrt(MultLossCoatNoiseTimesf);
+      
+   const double totalNoiseMultLossAngle = MultLossCoatNoiseTimesf + subNoiseTimesf;
+   const double totalNoiseMultLossAngleSqrtf = sqrt(totalNoiseMultLossAngle);
+
+   // Create the dat file that houses the loss angle information.
+   if (Utilities::MPI::this_mpi_process(mpi_communicator) == 0) {
+       std::ofstream dOut("MultipleLossAngles.dat", std::ios::app);
+          
+          if (cycle == 0)
+          {
+              dOut << "Loss Angle Stuff" << std::endl;
+              dOut << "First Row, old code. Second row, multiple loss angles."              << std::endl;
+              dOut << "# [1] refinement level = cycle"                                      << std::endl;
+              dOut << "# [2] coating energy"                                                << std::endl;
+              dOut << "# [3] CoatNoiseTimes"                                                << std::endl;
+              dOut << "# [4] coating amp noise (m/sqrt(Hz)) * sqrt(f) "                     << std::endl;
+              dOut << "# [5] Total amp noise "                                              << std::endl;
+              
+              dOut << " " << std::endl;
+              
+              dOut << "# [1] refinement level = cycle"                                      << std::endl;
+              dOut << "# [2] Coating energy with more additional loss angles"               << std::endl;
+              dOut << "# [3] MultLossCoatNoiseTimesf "                                      << std::endl;
+              dOut << "# [4] coating amp noise (m/sqrt(Hz)) * sqrt(f) (more loss angles) "  << std::endl;
+              dOut << "# [5] Total amp noise for multiple loss angles "                     << std::endl;
+              dOut << " " << std::endl;
+          }
+          
+          dOut << std::setprecision(14);
+          dOut << cycle                     << " | " // [1]
+	       << coatingEnergy                 << " | " // [2]
+	       << coatNoiseTimesf               << " | " // [4]
+	       << coatAmpNoiseTimesSqrtf        << " | " // [6]
+	       << totalAmpNoiseTimesSqrtf       << " | " // [8]
+	       << std::endl;
+      dOut << cycle                         << " | " // [1]
+           << MultLossCoatingEnergy         << " | " // [3]
+           << MultLossCoatNoiseTimesf       << " | " // [5]
+           << MultLossCoatNoiseTimesfSqrtf  << " | " // [7]
+           << totalNoiseMultLossAngleSqrtf  << " | " // [9]
+           << std::endl;
+      dOut << " " << std::endl;
+          
+      }
+
     
 
     pcout << "Total energy: " << energy << std::endl;
