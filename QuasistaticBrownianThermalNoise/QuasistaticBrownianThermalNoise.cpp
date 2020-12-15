@@ -1003,6 +1003,8 @@ void ElasticProblem<dim>::setup_system() {
   DoFTools::make_hanging_node_constraints(dof_handler, constraints);
   VectorTools::interpolate_boundary_values(dof_handler, 0,
                                            ZeroFunction<dim>(dim), constraints);
+  VectorTools::interpolate_boundary_values(dof_handler, 2,
+                                           ZeroFunction<dim>(dim), constraints);
   constraints.close();
 
   // Initialize the matrix. Use CompressedSimpleSparsityPattern
