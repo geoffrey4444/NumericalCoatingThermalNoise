@@ -36,6 +36,10 @@ Resolution:
   # coating potential energy (and thus the coating thermal noise) inaccurate.
   QuadratureIterations: 10
 
+# Set to true in order to output the volume data
+VolumeData:
+  VolumeDataOutput: False
+
 # Run tests, instead of getting and outputting the solution?
 Tests:
   RunTests: True
