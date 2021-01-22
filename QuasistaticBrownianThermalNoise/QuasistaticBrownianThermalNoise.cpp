@@ -611,7 +611,7 @@ ElasticProblem<dim>::ElasticProblem()
       // Initialize a timer
       computing_timer(mpi_communicator, pcout, TimerOutput::summary,
                       TimerOutput::wall_times),
-      mVTKOutput(false) {
+      mVTKOutput(config["VolumeData"]["VolumeDataOutput"].as<bool>()) {
   beam_profile =
       profile_from_string.at(config["LaserBeam"]["Profile"].as<std::string>());
 
@@ -1000,6 +1000,9 @@ void ElasticProblem<dim>::setup_system() {
   constraints.reinit(locally_relevant_dofs);  // if not locally relevant
                                               // only, could use huge amount
                                               // of memory
+  // The boundaries are colored according to the following scheme: 0 for the
+  // hull of the cylinder, 1 for the left hand face and 2 for the right hand 
+  // face.
   DoFTools::make_hanging_node_constraints(dof_handler, constraints);
   VectorTools::interpolate_boundary_values(dof_handler, 0,
                                            ZeroFunction<dim>(dim), constraints);
