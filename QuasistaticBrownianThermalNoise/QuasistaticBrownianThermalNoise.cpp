@@ -102,6 +102,7 @@ using namespace dealii::LinearAlgebraTrilinos;
 // Global variable holding the configuration (to be read from a .yaml file)
 YAML::Node config;
 YAML::Node config_multloss;
+YAML::Node config_rotation;
 
 //****************************************************************//
 // Enumerate different available Yijkl
@@ -254,6 +255,10 @@ class ElasticProblem {
   int mWhichCoatingYijkl;
   int mWhichSubstrateYijkl;
 
+  double theta;
+  double alpha;
+  double beta; 
+
   double ScaleYijklPhiBulk(double lame_mu, double lame_lambda, double phibulk,
                            double phishear);
 
@@ -269,6 +274,7 @@ class ElasticProblem {
   double getYijklPhiCrystal(int whichYijkl, unsigned int i, unsigned int j,
                             unsigned int k, unsigned int l, double phi11,
                             double phi12, double phi44);
+  double getYijklRotated(Tensor<4, dim> Yijkl, unsigned int i, unsigned int j, unsigned int k, unsigned int l, double theta, double alpha, double beta);
 };
 
 //****************************************************************//
@@ -559,6 +565,46 @@ double ElasticProblem<dim>::getYijklPhiCrystal(int whichYijkl, unsigned int i,
   }
 }
 
+template <int dim>
+double ElasticProblem<dim>::getYijklRotated(Tensor<4, dim> Yijkl, unsigned int i, unsigned int j, unsigned int k, unsigned int l, double theta, double alpha, double beta){
+  
+   std::array<std::array<double, dim> , dim> rotationmatrix = {{
+   {cos(theta) * cos(beta),
+     (cos(theta) * sin(beta) * sin(alpha)) - (sin(theta) * cos(alpha)), 
+      (cos(theta) * sin(beta) * cos(alpha)) + (sin(theta) * sin(alpha))},
+
+   {sin(theta) * cos(beta),
+     (sin(theta) * sin(beta) * sin(alpha)) + (cos(theta) * cos(alpha)),
+      (sin(theta) * sin(beta) * cos(alpha)) - (cos(theta) * sin(alpha))},
+
+   {-sin(beta),
+     cos(beta) * sin(alpha),
+     cos(beta) * cos(alpha)} }
+  };
+
+  // for(int a = 0; a < dim; a++)
+  //   for(int b = 0; b < dim; b++)
+  //     std::cout << "The Rotation Matrix R[" << a << "][" << b << "] is " << rotationmatrix[a][b] << std::endl;
+
+  Tensor<4, dim> rotated_Yijkl;
+  rotated_Yijkl[i][j][k][l] = 0;
+
+  for(int a = 0; a < dim; a++)
+    for(int b = 0; b < dim; b++)
+      for(int c = 0; c < dim; c++)
+        for(int d = 0; d < dim; d++){
+          rotated_Yijkl[i][j][k][l] += rotationmatrix[i][a] * rotationmatrix[j][b] * rotationmatrix[k][c] * rotationmatrix[l][d] * Yijkl[a][b][c][d];
+        }
+
+  if(rotated_Yijkl[i][j][k][l] > 1.0e-12){
+    Yijkl[i][j][k][l] = rotated_Yijkl[i][j][k][l];
+  }
+  else{
+    Yijkl[i][j][k][l] = 0.0;
+  }
+  return Yijkl[i][j][k][l];
+}
+
 // Calculates and returns the correct value for Y_Ijkl_Phi in terms of the bulk
 // and shear modulus. The ints i,j,k,l that are passed are the tensor indexes of
 // the Youngs that assign the correct values to the youngs tensor for each of
@@ -691,6 +737,10 @@ ElasticProblem<dim>::ElasticProblem()
   lossPhi_Iso_AlGaAs_bulk = config_multloss["Iso_AlGaAs"]["Bulk"].as<double>();
   lossPhi_Iso_AlGaAs_shear =
       config_multloss["Iso_AlGaAs"]["Shear"].as<double>();
+
+  theta = config_rotation["Zaxis"]["Angle"].as<double>() * (M_PI/180);
+  alpha = config_rotation["Yaxis"]["Angle"].as<double>() * (M_PI/180);
+  beta  = config_rotation["Xaxis"]["Angle"].as<double>() * (M_PI/180);
 
   // halflength = rad/8.+d/2.; //0.25 in + coating = total thickness
   halflength =
@@ -952,6 +1002,26 @@ ElasticProblem<dim>::ElasticProblem()
   Y_AlGaAs_Phi[1][2][2][1] = c44_AlGaAs * lossPhi_AlGaAs_44;
   Y_AlGaAs_Phi[2][1][1][2] = c44_AlGaAs * lossPhi_AlGaAs_44;
   Y_AlGaAs_Phi[2][1][2][1] = c44_AlGaAs * lossPhi_AlGaAs_44;
+
+  for (int i = 0; i < dim; ++i) {
+    for (int j = 0; j < dim; ++j) { 
+      for (int k = 0; k < dim; ++k) {
+        for (int l = 0; l < dim; ++l) {
+          Y_Iso_FusedSilica[i][j][k][l]     = getYijklRotated(Y_Iso_FusedSilica,     i, j, k, l, theta, alpha, beta);
+          Y_Iso_FusedSilica_Phi[i][j][k][l] = getYijklRotated(Y_Iso_FusedSilica_Phi, i, j, k, l, theta, alpha, beta);
+
+          Y_Iso_Ta2O5[i][j][k][l]     = getYijklRotated(Y_Iso_Ta2O5,     i, j, k, l, theta, alpha, beta);
+          Y_Iso_Ta2O5_Phi[i][j][k][l] = getYijklRotated(Y_Iso_Ta2O5_Phi, i, j, k, l, theta, alpha, beta);
+
+          Y_Iso_AlGaAs[i][j][k][l]     = getYijklRotated(Y_Iso_AlGaAs,     i, j, k, l, theta, alpha, beta);
+          Y_Iso_AlGaAs_Phi[i][j][k][l] = getYijklRotated(Y_Iso_AlGaAs_Phi, i, j, k, l, theta, alpha, beta);
+
+          Y_AlGaAs[i][j][k][l]     = getYijklRotated(Y_AlGaAs,     i, j, k, l, theta, alpha, beta);
+          Y_AlGaAs_Phi[i][j][k][l] = getYijklRotated(Y_AlGaAs_Phi, i, j, k, l, theta, alpha, beta);
+        }
+      }
+    }
+  }
 
 }  // end of ElasticProblem constructor
 
@@ -1829,6 +1899,7 @@ int main(int argc, char** argv) {
   // files
   std::string config_file = "";
   std::string config_multloss_file = "";
+  std::string config_rotation_file = "";
 
   // Parse the command-line arguments using catch's parser
   Catch::Session session;
@@ -1846,6 +1917,14 @@ int main(int argc, char** argv) {
           "Path to configuration file with multiple loss angles .yaml "
           "file");
   session.cli(cli_multloss);
+  auto cli_rotation =
+      session.cli() |
+      Catch::clara::Opt(
+          config_rotation_file,
+          "config_rotation_file")["-r"]["--configuration_rotation"](
+          "Path to configuration file with rotation angles .yaml "
+          "file");
+  session.cli(cli_rotation);
 
   const int return_code = session.applyCommandLine(argc, argv);
   if (return_code != 0) {
@@ -1856,6 +1935,7 @@ int main(int argc, char** argv) {
   // Parse the input files
   config = YAML::LoadFile(config_file);
   config_multloss = YAML::LoadFile(config_multloss_file);
+  config_rotation = YAML::LoadFile(config_rotation_file);
 
   try {
     using namespace dealii;
